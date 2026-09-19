@@ -17,18 +17,47 @@ def is_admin_id(uid): return uid in settings.admins
 def is_admin(m): return is_admin_id(m.from_user.id)
 
 def parse_info(text):
-    values={'title':'','year':None,'genre':'','country':'','rating':'','description':''}
-    aliases={'nomi':'title','kino nomi':'title','serial nomi':'title','title':'title','название':'title','yil':'year','yili':'year','год':'year','janr':'genre','janri':'genre','жанр':'genre','davlat':'country','davlati':'country','mamlakat':'country','страна':'country','reyting':'rating','reytingi':'rating','rating':'rating','рейтинг':'rating','tavsif':'description','description':'description','описание':'description'}
-    for raw in text.splitlines():
-        if ':' not in raw: continue
-        k,v=raw.split(':',1); k=re.sub(r'^[^\w]+','',k.strip(),flags=re.UNICODE).strip().lower(); k=re.sub(r'\s+',' ',k)
-        key=aliases.get(k)
-        if not key: continue
-        v=v.strip()
-        if key=='year':
-            try: values[key]=int(re.search(r'\d{4}',v).group())
-            except Exception: pass
-        else: values[key]=v
+    values = {
+        'title': '', 'year': None, 'genre': '',
+        'country': '', 'rating': '', 'description': ''
+    }
+
+    aliases = {
+        'nomi': 'title', 'kino nomi': 'title', 'serial nomi': 'title',
+        'film nomi': 'title', 'title': 'title', 'название': 'title',
+        'yil': 'year', 'yili': 'year', 'год': 'year',
+        'janr': 'genre', 'janri': 'genre', 'жанр': 'genre',
+        'davlat': 'country', 'davlati': 'country',
+        'mamlakat': 'country', 'страна': 'country',
+        'reyting': 'rating', 'reytingi': 'rating', 'rating': 'rating',
+        'рейтинг': 'rating',
+        'tavsif': 'description', 'description': 'description',
+        'описание': 'description'
+    }
+
+    for raw in (text or '').splitlines():
+        if ':' not in raw:
+            continue
+
+        k, v = raw.split(':', 1)
+
+        # Remove Telegram/Unicode emoji and punctuation before matching.
+        k = k.strip().lower()
+        k = re.sub(r'[\U00010000-\U0010ffff]', '', k)
+        k = re.sub(r'^[^\w]+', '', k, flags=re.UNICODE)
+        k = re.sub(r'\s+', ' ', k).strip()
+        key = aliases.get(k)
+        if not key:
+            continue
+
+        v = v.strip()
+        if key == 'year':
+            m = re.search(r'\b(19|20)\d{2}\b', v)
+            if m:
+                values[key] = int(m.group())
+        else:
+            values[key] = v
+
     return values
 
 def info_prompt(kind):
@@ -134,16 +163,80 @@ async def sp(m,state):
     await publish_ad(m.bot,x,'series'); await state.clear(); await m.answer(f'✅ Serial qo‘shildi!\n📺 {x.title_uz}\n🔢 Kod: {x.code}\n🎞 1-qism: 1-fasl')
 
 @router.channel_post(F.video)
-async def private_import(post:Message):
-    if not settings.private_movie_channel_id or post.chat.id!=settings.private_movie_channel_id:return
-    caption=post.caption or ''; info=parse_info(caption)
+async def private_import(post: Message):
+    """Import a video posted by an admin into the private movie database channel.
+
+    Telegram keeps the video in the channel; we store its file_id/file_unique_id
+    in PostgreSQL, so Render never downloads the large video.
+    """
+    if not settings.private_movie_channel_id:
+        return
+    if post.chat.id != settings.private_movie_channel_id:
+        return
+
+    caption = post.caption or ''
+    info = parse_info(caption)
+
+    # Accept the normal channel format shown to the admin:
+    # 🎬 Kino nomi: Qasos
+    # 📅 Yil: 2017
+    # 🎭 Janr: ...
+    # 🌍 Davlat: ...
+    # ⭐ Reyting: ...
+    # 📝 Tavsif: ...
     if not info['title']:
-        await post.reply('❌ Kino nomi caption ichida topilmadi. Masalan: 🎬 Kino nomi: Qasos'); return
+        await post.reply(
+            '❌ Kino nomi topilmadi.\n\n'
+            'Caption ichida quyidagidek yozing:\n'
+            '🎬 Kino nomi: Qasos\n'
+            '📅 Yil: 2017\n'
+            '🎭 Janr: #Triller #Jangari\n'
+            '🌍 Davlat: AQSH\n'
+            '⭐ Reyting: 6.4\n'
+            '📝 Tavsif: ...'
+        )
+        return
+
     async with Session() as s:
-        dup=(await s.execute(select(Movie).where(Movie.source_channel_id==post.chat.id,Movie.source_message_id==post.message_id))).scalar_one_or_none()
-        if dup:return
-        code=await next_code(s); x=Movie(code=code,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'] or caption,description_ru=info['description'] or caption,description_uz_entities=serialize_entities(post.caption_entities),description_ru_entities=serialize_entities(post.caption_entities),year=info['year'],genre=info['genre'],country=info['country'],rating=info['rating'],video_file_id=post.video.file_id,video_file_unique_id=post.video.file_unique_id,source_channel_id=post.chat.id,source_message_id=post.message_id); s.add(x); await s.commit()
-    await post.reply(f'✅ Bazaga saqlandi\n🎬 {x.title_uz}\n🔢 Kod: {x.code}\n🖼 Poster kerak bo‘lsa /movies → Kino qo‘shish orqali to‘liq reklama yarating.')
+        dup = (
+            await s.execute(
+                select(Movie).where(
+                    Movie.source_channel_id == post.chat.id,
+                    Movie.source_message_id == post.message_id
+                )
+            )
+        ).scalar_one_or_none()
+
+        if dup:
+            return
+
+        code = await next_code(s)
+        x = Movie(
+            code=code,
+            title_uz=info['title'],
+            title_ru=info['title'],
+            description_uz=info['description'] or '',
+            description_ru=info['description'] or '',
+            description_uz_entities=serialize_entities(post.caption_entities),
+            description_ru_entities=serialize_entities(post.caption_entities),
+            year=info['year'],
+            genre=info['genre'],
+            country=info['country'],
+            rating=info['rating'],
+            video_file_id=post.video.file_id,
+            video_file_unique_id=post.video.file_unique_id,
+            source_channel_id=post.chat.id,
+            source_message_id=post.message_id
+        )
+        s.add(x)
+        await s.commit()
+
+    await post.reply(
+        f'✅ Kino bazaga avtomatik saqlandi!\n'
+        f'🎬 {x.title_uz}\n'
+        f'🔢 Kino kodi: {x.code}\n\n'
+        f'ℹ️ Video Telegram kanalida qoladi, bot esa file_id orqali ishlatadi.'
+    )
 
 @router.message(F.text=='📢 Majburiy obuna')
 async def mandatory_menu(m):
