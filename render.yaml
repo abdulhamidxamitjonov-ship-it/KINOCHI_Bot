@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: kino-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && python -m app.main
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: kino-db
+          property: connectionString
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: AD_CHANNEL_ID
+        sync: false
+      - key: AD_CHANNEL_URL
+        sync: false
+      - key: PRIVATE_MOVIE_CHANNEL_ID
+        sync: false
+      - key: PRIVATE_MOVIE_CHANNEL_URL
+        sync: false
+      - key: UZCARD_CARD_NUMBER
+        sync: false
+      - key: UZCARD_CARD_NAME
+        sync: false
+      - key: HUMO_CARD_NUMBER
+        sync: false
+      - key: HUMO_CARD_NAME
+        sync: false
+      - key: VISA_CARD_NUMBER
+        sync: false
+      - key: VISA_CARD_NAME
+        sync: false
+      - key: MASTER_CARD_NUMBER
+        sync: false
+      - key: MASTER_CARD_NAME
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+
+databases:
+  - name: kino-db
