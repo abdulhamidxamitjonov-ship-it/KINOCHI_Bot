@@ -18,5 +18,8 @@ async def code(m:Message):
         if not ok: return await m.answer(reason)
         movie.views+=1; s.add(ContentView(content_type='movie',content_id=movie.id,user_id=u.id)); await s.commit()
         title=movie.title_ru if u.language=='ru' else movie.title_uz; desc=movie.description_ru if u.language=='ru' else movie.description_uz
-    if movie.poster_file_id: await m.answer_photo(movie.poster_file_id,caption=desc or title)
-    if movie.video_file_id: await m.answer_video(movie.video_file_id,caption=title)
+    is_admin = m.from_user.id in __import__('app.config', fromlist=['settings']).settings.admins
+    if movie.poster_file_id:
+        await m.answer_photo(movie.poster_file_id, caption=desc or title, protect_content=not is_admin)
+    if movie.video_file_id:
+        await m.answer_video(movie.video_file_id, caption=title, protect_content=not is_admin)

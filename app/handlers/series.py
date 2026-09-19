@@ -74,5 +74,5 @@ async def episode(c: CallbackQuery):
         s.add(ContentView(content_type='episode', content_id=ep.id, user_id=u.id))
         await s.commit()
         title = series.title_ru if u.language == 'ru' else series.title_uz
-    await c.bot.send_video(c.from_user.id, ep.video_file_id, caption=f'📺 {title}\n🎬 {ep.season_number}-fasl • {ep.episode_number}-qism')
+    await c.bot.send_video(c.from_user.id, ep.video_file_id, caption=f'📺 {title}\n🎬 {ep.season_number}-fasl • {ep.episode_number}-qism', protect_content=(c.from_user.id not in settings.admins))
     await c.answer()
