@@ -3,13 +3,21 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from app.database.models import VipPayment
 from app.database.database import Session
+from app.config import settings
 from app.states.admin_content import MovieAddState, SeriesAddState
 
 router = Router()
 
 @router.message(F.photo)
 async def receipt(m: Message, state: FSMContext):
-    # Never treat an admin's movie/series poster as a payment receipt.
+    # Payment receipts are for regular users. Admin poster images must be
+    # handled by the content router, so never claim an admin photo as a receipt.
+    if m.from_user.id in settings.admins:
+        return
+
+    # Poster images are intentionally NOT receipts. They are accepted only
+    # by the admin content handler when replying to the exact poster prompt.
+    # Regular users do not have the admin movie/series FSM states.
     current = await state.get_state()
     if current in {
         MovieAddState.waiting_poster.state,
@@ -21,7 +29,6 @@ async def receipt(m: Message, state: FSMContext):
     }:
         return
 
-    # Accept a receipt only when the user has a pending VIP payment.
     async with Session() as s:
         from sqlalchemy import select
         from app.database.models import User
