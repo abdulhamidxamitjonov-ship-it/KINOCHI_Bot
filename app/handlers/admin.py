@@ -9,7 +9,10 @@ from app.config import settings
 from app.database.database import Session
 from app.database.models import User, Movie, Series, Episode, VipPayment, MandatoryChannel
 from app.keyboards.admin import menu, confirm
-from app.states.admin_content import MovieAddState, SeriesAddState, MandatoryAddState
+from app.states.admin_content import (
+    MovieAddState, SeriesAddState, SeriesEpisodeAddState,
+    MovieEditState, SeriesEditState, MandatoryAddState
+)
 from app.utils.entities import serialize_entities, deserialize_entities
 from app.utils.deep_links import movie_link, series_link
 
@@ -111,30 +114,243 @@ async def stats(m):
         for model,label in [(User,'👥 Users'),(Movie,'🎬 Kinolar'),(Series,'📺 Seriallar'),(Episode,'🎞 Qismlar'),(VipPayment,'💳 To‘lovlar'),(MandatoryChannel,'📢 Majburiy obuna')]: vals.append(f'{label}: {await s.scalar(select(func.count()).select_from(model))}')
     await m.answer('📊 Statistika\n'+'\n'.join(vals))
 
+# ---------------- CONTENT ADMIN ----------------
+
+def admin_content_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='➕ Kino qo‘shish', callback_data='content:add_movie')],
+        [InlineKeyboardButton(text='✏️ Kino tahrirlash', callback_data='content:movies')],
+        [InlineKeyboardButton(text='➕ Serial qo‘shish', callback_data='content:add_series')],
+        [InlineKeyboardButton(text='✏️ Serial / qism tahrirlash', callback_data='content:series')],
+    ])
+
 @router.message(Command('movies'))
 async def movies_cmd(m):
-    if is_admin(m): await m.answer('🎬 Kinolar',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='➕ Kino qo‘shish',callback_data='content:add_movie')]]))
+    if is_admin(m):
+        await m.answer('🎬 Kinolar bo‘limi', reply_markup=admin_content_kb())
+
 @router.message(Command('series'))
 async def series_cmd(m):
-    if is_admin(m): await m.answer('📺 Seriallar',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='➕ Serial qo‘shish',callback_data='content:add_series')]]))
+    if is_admin(m):
+        await m.answer('📺 Seriallar bo‘limi', reply_markup=admin_content_kb())
 
 @router.message(F.text=='🎬 Kinolar')
-async def movies_menu(m): await movies_cmd(m)
+async def movies_menu(m):
+    await movies_cmd(m)
+
 @router.message(F.text=='📺 Seriallar')
-async def series_menu(m): await series_cmd(m)
+async def series_menu(m):
+    await series_cmd(m)
+
+@router.callback_query(F.data=='content:home')
+async def content_home(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q', show_alert=True)
+    await c.message.edit_text('🗂 Kontent boshqaruvi', reply_markup=admin_content_kb())
+    await c.answer()
 
 @router.callback_query(F.data=='content:add_movie')
 async def add_movie(c,state):
     if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
-    await state.clear(); await state.set_state(MovieAddState.waiting_video); await c.message.answer('🎬 Avval kino videosini yuboring.'); await c.answer()
+    await state.clear(); await state.set_state(MovieAddState.waiting_video)
+    await c.message.answer('🎬 Avval kino videosini yuboring.')
+    await c.answer()
+
 @router.callback_query(F.data=='content:add_series')
 async def add_series(c,state):
     if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
-    await state.clear(); await state.set_state(SeriesAddState.waiting_video); await c.message.answer('📺 Avval 1-qism videosini yuboring.'); await c.answer()
+    await state.clear(); await state.set_state(SeriesAddState.waiting_video)
+    await c.message.answer('📺 Avval serialning 1-qism videosini yuboring.')
+    await c.answer()
+
+@router.callback_query(F.data=='content:movies')
+async def movie_list(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    async with Session() as s:
+        items=(await s.execute(select(Movie).order_by(Movie.id.desc()).limit(50))).scalars().all()
+    rows=[]
+    for x in items:
+        rows.append([InlineKeyboardButton(text=f'🎬 {x.code} — {x.title_uz[:35]}', callback_data=f'content:movie:{x.id}')])
+    rows.append([InlineKeyboardButton(text='➕ Kino qo‘shish',callback_data='content:add_movie')])
+    rows.append([InlineKeyboardButton(text='🔙 Orqaga',callback_data='content:home')])
+    await c.message.edit_text('🎬 Qo‘shilgan kinolar:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await c.answer()
+
+@router.callback_query(F.data=='content:series')
+async def series_list(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    async with Session() as s:
+        items=(await s.execute(select(Series).order_by(Series.id.desc()).limit(50))).scalars().all()
+    rows=[]
+    for x in items:
+        rows.append([InlineKeyboardButton(text=f'📺 {x.code} — {x.title_uz[:35]}', callback_data=f'content:series:{x.id}')])
+    rows.append([InlineKeyboardButton(text='➕ Serial qo‘shish',callback_data='content:add_series')])
+    rows.append([InlineKeyboardButton(text='🔙 Orqaga',callback_data='content:home')])
+    await c.message.edit_text('📺 Qo‘shilgan seriallar:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await c.answer()
+
+@router.callback_query(F.data.startswith('content:movie:'))
+async def movie_manage(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    mid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s:
+        x=await s.get(Movie,mid)
+    if not x: return await c.answer('Kino topilmadi',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✏️ Tahrirlash',callback_data=f'content:movie_edit:{mid}')],
+        [InlineKeyboardButton(text='🗑 O‘chirish',callback_data=f'content:movie_delete:{mid}')],
+        [InlineKeyboardButton(text='🔙 Kinolar',callback_data='content:movies')]
+    ])
+    await c.message.edit_text(f'🎬 {x.title_uz}\n🔢 Kod: {x.code}\n👁 Ko‘rishlar: {x.views}',reply_markup=kb)
+    await c.answer()
+
+@router.callback_query(F.data.startswith('content:series:'))
+async def series_manage(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    sid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s:
+        x=await s.get(Series,sid)
+        eps=(await s.execute(select(Episode).where(Episode.series_id==sid).order_by(Episode.season_number,Episode.episode_number))).scalars().all()
+    if not x: return await c.answer('Serial topilmadi',show_alert=True)
+    seasons=sorted({e.season_number for e in eps})
+    info=f'📺 {x.title_uz}\n🔢 Kod: {x.code}\n📚 Fasllar: {len(seasons)}\n🎞 Qismlar: {len(eps)}'
+    rows=[
+        [InlineKeyboardButton(text='➕ Boshqa qism/fasl qo‘shish',callback_data=f'content:episode_add:{sid}')],
+        [InlineKeyboardButton(text='✏️ Serial ma’lumotini tahrirlash',callback_data=f'content:series_edit:{sid}')],
+    ]
+    for e in eps[:50]:
+        rows.append([InlineKeyboardButton(text=f'🎞 {e.season_number}-fasl {e.episode_number}-qism',callback_data=f'content:episode:{e.id}')])
+    rows.append([InlineKeyboardButton(text='🗑 Serialni o‘chirish',callback_data=f'content:series_delete:{sid}')])
+    rows.append([InlineKeyboardButton(text='🔙 Seriallar',callback_data='content:series')])
+    await c.message.edit_text(info,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await c.answer()
+
+@router.callback_query(F.data.startswith('content:episode_add:'))
+async def episode_add_start(c,state):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    sid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s: x=await s.get(Series,sid)
+    if not x: return await c.answer('Serial topilmadi',show_alert=True)
+    await state.clear(); await state.update_data(series_id=sid); await state.set_state(SeriesEpisodeAddState.waiting_video)
+    await c.message.answer(f'📺 {x.title_uz}\n\n🎬 Yangi qism videosini yuboring.')
+    await c.answer()
+
+@router.message(SeriesEpisodeAddState.waiting_video,F.video)
+async def episode_video(m,state):
+    await state.update_data(video_file_id=m.video.file_id,video_file_unique_id=m.video.file_unique_id)
+    await state.set_state(SeriesEpisodeAddState.waiting_season)
+    await m.answer('📚 Qaysi fasl? Masalan: 1')
+
+@router.message(SeriesEpisodeAddState.waiting_season,F.text)
+async def episode_season(m,state):
+    try: sn=int(m.text.strip())
+    except ValueError: return await m.answer('❌ Fasl raqamini faqat son bilan yuboring.')
+    if sn<1: return await m.answer('❌ Fasl raqami 1 dan boshlanadi.')
+    await state.update_data(season_number=sn); await state.set_state(SeriesEpisodeAddState.waiting_episode)
+    await m.answer('🎞 Qaysi qism? Masalan: 2')
+
+@router.message(SeriesEpisodeAddState.waiting_episode,F.text)
+async def episode_number(m,state):
+    try: en=int(m.text.strip())
+    except ValueError: return await m.answer('❌ Qism raqamini faqat son bilan yuboring.')
+    if en<1: return await m.answer('❌ Qism raqami 1 dan boshlanadi.')
+    d=await state.get_data()
+    async with Session() as s:
+        x=await s.get(Series,d['series_id'])
+        if not x: await state.clear(); return await m.answer('❌ Serial topilmadi.')
+        exists=(await s.execute(select(Episode).where(Episode.series_id==x.id,Episode.season_number==d['season_number'],Episode.episode_number==en))).scalar_one_or_none()
+        if exists: return await m.answer('❌ Bu fasl va qism allaqachon mavjud. Boshqa raqam yuboring.')
+        e=Episode(series_id=x.id,season_number=d['season_number'],episode_number=en,title_uz=x.title_uz,title_ru=x.title_ru,description_uz=x.description_uz,description_ru=x.description_ru,description_uz_entities=x.description_uz_entities,description_ru_entities=x.description_ru_entities,video_file_id=d['video_file_id'],video_file_unique_id=d['video_file_unique_id'])
+        s.add(e); await s.commit()
+    await state.clear(); await m.answer(f'✅ Qo‘shildi: {x.title_uz}\n🎞 {d["season_number"]}-fasl {en}-qism')
+
+@router.callback_query(F.data.startswith('content:episode:'))
+async def episode_manage(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    eid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s:
+        e=await s.get(Episode,eid)
+        x=await s.get(Series,e.series_id) if e else None
+    if not e or not x: return await c.answer('Qism topilmadi',show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🗑 Qismni o‘chirish',callback_data=f'content:episode_delete:{eid}')],
+        [InlineKeyboardButton(text='🔙 Serialga qaytish',callback_data=f'content:series:{x.id}')]
+    ])
+    await c.message.edit_text(f'📺 {x.title_uz}\n🎞 {e.season_number}-fasl {e.episode_number}-qism',reply_markup=kb); await c.answer()
+
+@router.callback_query(F.data.startswith('content:episode_delete:'))
+async def episode_delete(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    eid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s:
+        e=await s.get(Episode,eid)
+        if not e: return await c.answer('Qism topilmadi',show_alert=True)
+        sid=e.series_id; await s.delete(e); await s.commit()
+    await c.answer('✅ Qism o‘chirildi'); await c.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔙 Serialga qaytish',callback_data=f'content:series:{sid}')]]))
+
+@router.callback_query(F.data.startswith('content:movie_delete:'))
+async def movie_delete(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    mid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s:
+        x=await s.get(Movie,mid)
+        if not x:return await c.answer('Kino topilmadi',show_alert=True)
+        await s.delete(x); await s.commit()
+    await c.answer('✅ Kino o‘chirildi'); await movie_list(c)
+
+@router.callback_query(F.data.startswith('content:series_delete:'))
+async def series_delete(c):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    sid=int(c.data.rsplit(':',1)[1])
+    async with Session() as s:
+        x=await s.get(Series,sid)
+        if not x:return await c.answer('Serial topilmadi',show_alert=True)
+        await s.delete(x); await s.commit()
+    await c.answer('✅ Serial o‘chirildi'); await series_list(c)
+
+@router.callback_query(F.data.startswith('content:movie_edit:'))
+async def movie_edit_start(c,state):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    mid=int(c.data.rsplit(':',1)[1]); await state.clear(); await state.update_data(movie_id=mid); await state.set_state(MovieEditState.waiting_info)
+    await c.message.answer('✏️ Yangi kino ma’lumotlarini bitta xabarda yuboring:\nNomi, Yil, Janr, Davlat, Reyting, Tavsif, Kod') ; await c.answer()
+
+@router.message(MovieEditState.waiting_info,F.text)
+async def movie_edit_save(m,state):
+    info=parse_info(m.text); d=await state.get_data();
+    if not info['title'] or not info['code']: return await m.answer('❌ Nomi va kod majburiy.')
+    async with Session() as s:
+        x=await s.get(Movie,d['movie_id'])
+        dup=(await s.execute(select(Movie).where(Movie.code==info['code'],Movie.id!=x.id))).scalar_one_or_none() if x else None
+        if not x:return await m.answer('❌ Kino topilmadi.')
+        if dup or (await s.execute(select(Series).where(Series.code==info['code']))).scalar_one_or_none():return await m.answer('❌ Bu kod band.')
+        x.code=info['code'];x.title_uz=x.title_ru=info['title'];x.description_uz=x.description_ru=info['description'];x.description_uz_entities=x.description_ru_entities=x.metadata_entities=serialize_entities(m.entities);x.metadata_text=m.text;x.year=info['year'];x.genre=info['genre'];x.country=info['country'];x.rating=info['rating'];await s.commit()
+    await state.clear(); await m.answer('✅ Kino ma’lumotlari tahrirlandi.')
+
+@router.callback_query(F.data.startswith('content:series_edit:'))
+async def series_edit_start(c,state):
+    if not is_admin_id(c.from_user.id): return await c.answer('Ruxsat yo‘q',show_alert=True)
+    sid=int(c.data.rsplit(':',1)[1]); await state.clear(); await state.update_data(series_id=sid); await state.set_state(SeriesEditState.waiting_info)
+    await c.message.answer('✏️ Yangi serial ma’lumotlarini bitta xabarda yuboring:\nNomi, Yil, Janr, Davlat, Reyting, Tavsif, Kod'); await c.answer()
+
+@router.message(SeriesEditState.waiting_info,F.text)
+async def series_edit_save(m,state):
+    info=parse_info(m.text); d=await state.get_data()
+    if not info['title'] or not info['code']: return await m.answer('❌ Nomi va kod majburiy.')
+    async with Session() as s:
+        x=await s.get(Series,d['series_id'])
+        if not x:return await m.answer('❌ Serial topilmadi.')
+        dup=(await s.execute(select(Series).where(Series.code==info['code'],Series.id!=x.id))).scalar_one_or_none()
+        if dup or (await s.execute(select(Movie).where(Movie.code==info['code']))).scalar_one_or_none():return await m.answer('❌ Bu kod band.')
+        x.code=info['code'];x.title_uz=x.title_ru=info['title'];x.description_uz=x.description_ru=info['description'];x.description_uz_entities=x.description_ru_entities=x.metadata_entities=serialize_entities(m.entities);x.metadata_text=m.text;x.year=info['year'];x.genre=info['genre'];x.country=info['country'];x.rating=info['rating'];await s.commit()
+    await state.clear(); await m.answer('✅ Serial ma’lumotlari tahrirlandi.')
+
+# Existing movie/series creation handlers remain below.
 
 @router.message(MovieAddState.waiting_video,F.video)
 async def mv(m,state):
-    await state.update_data(video_file_id=m.video.file_id,video_file_unique_id=m.video.file_unique_id); await state.set_state(MovieAddState.waiting_info); await m.answer(info_prompt('movie'))
+    await state.update_data(video_file_id=m.video.file_id,video_file_unique_id=m.video.file_unique_id)
+    await state.set_state(MovieAddState.waiting_info)
+    await m.answer(info_prompt('movie'))
+
 @router.message(MovieAddState.waiting_info,F.text)
 async def mi(m,state):
     info=parse_info(m.text)
@@ -143,38 +359,22 @@ async def mi(m,state):
     if not info['code']:
         return await m.answer('❌ Kino kodi topilmadi. Kodni eng oxirgi qatorda yozing: 🔢 Kod: 1234')
     d=await state.get_data()
-    await state.update_data(info=info,description_entities=serialize_entities(m.entities))
+    code=info['code'].strip()
+    if len(code)>64 or any(ch.isspace() for ch in code): return await m.answer('❌ Kod noto‘g‘ri. Kod 64 belgigacha va bo‘shliqsiz bo‘lsin.')
     async with Session() as s:
-        code=info['code'].strip()
-        if len(code)>64 or any(ch.isspace() for ch in code): return await m.answer('❌ Kod noto‘g‘ri. Kod 64 belgigacha va bo‘shliqsiz bo‘lsin.')
-        if (await s.execute(select(Movie).where(Movie.code==code))).scalar_one_or_none() or (await s.execute(select(Series).where(Series.code==code))).scalar_one_or_none(): return await m.answer('❌ Bu kod allaqachon ishlatilgan. Boshqa kod kiriting.')
-        x=Movie(
-            code=code,
-            title_uz=info['title'],
-            title_ru=info['title'],
-            description_uz=info['description'],
-            description_ru=info['description'],
-            description_uz_entities=serialize_entities(m.entities),
-            description_ru_entities=serialize_entities(m.entities),
-            metadata_text=m.text,
-            metadata_entities=serialize_entities(m.entities),
-            year=info['year'],
-            genre=info['genre'],
-            country=info['country'],
-            rating=info['rating'],
-            video_file_id=d['video_file_id'],
-            video_file_unique_id=d['video_file_unique_id']
-        )
-        s.add(x)
-        await s.commit()
-        await s.refresh(x)
-    await publish_ad(m.bot,x,'movie')
-    await state.clear()
-    await m.answer(f'✅ Kino qo‘shildi!\\n🎬 {x.title_uz}\\n🔢 Kod: {x.code}')
+        if (await s.execute(select(Movie).where(Movie.code==code))).scalar_one_or_none() or (await s.execute(select(Series).where(Series.code==code))).scalar_one_or_none():
+            return await m.answer('❌ Bu kod allaqachon ishlatilgan. Boshqa kod kiriting.')
+        x=Movie(code=code,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'],description_ru=info['description'],description_uz_entities=serialize_entities(m.entities),description_ru_entities=serialize_entities(m.entities),metadata_text=m.text,metadata_entities=serialize_entities(m.entities),year=info['year'],genre=info['genre'],country=info['country'],rating=info['rating'],video_file_id=d['video_file_id'],video_file_unique_id=d['video_file_unique_id'])
+        s.add(x); await s.commit(); await s.refresh(x)
+    await publish_ad(m.bot,x,'movie'); await state.clear()
+    await m.answer(f'✅ Kino qo‘shildi!\n🎬 {x.title_uz}\n🔢 Kod: {x.code}')
 
 @router.message(SeriesAddState.waiting_video,F.video)
 async def sv(m,state):
-    await state.update_data(video_file_id=m.video.file_id,video_file_unique_id=m.video.file_unique_id); await state.set_state(SeriesAddState.waiting_info); await m.answer(info_prompt('series'))
+    await state.update_data(video_file_id=m.video.file_id,video_file_unique_id=m.video.file_unique_id)
+    await state.set_state(SeriesAddState.waiting_info)
+    await m.answer(info_prompt('series'))
+
 @router.message(SeriesAddState.waiting_info,F.text)
 async def si(m,state):
     info=parse_info(m.text)
@@ -182,47 +382,17 @@ async def si(m,state):
         return await m.answer('❌ Serial nomi topilmadi. Masalan: 🎬 Serial nomi: ...')
     if not info['code']:
         return await m.answer('❌ Serial kodi topilmadi. Kodni eng oxirgi qatorda yozing: 🔢 Kod: 1234')
-    d=await state.get_data()
-    await state.update_data(info=info,description_entities=serialize_entities(m.entities))
+    d=await state.get_data(); code=info['code'].strip()
+    if len(code)>64 or any(ch.isspace() for ch in code): return await m.answer('❌ Kod noto‘g‘ri. Kod 64 belgigacha va bo‘shliqsiz bo‘lsin.')
     async with Session() as s:
-        code=info['code'].strip()
-        if len(code)>64 or any(ch.isspace() for ch in code): return await m.answer('❌ Kod noto‘g‘ri. Kod 64 belgigacha va bo‘shliqsiz bo‘lsin.')
-        if (await s.execute(select(Movie).where(Movie.code==code))).scalar_one_or_none() or (await s.execute(select(Series).where(Series.code==code))).scalar_one_or_none(): return await m.answer('❌ Bu kod allaqachon ishlatilgan. Boshqa kod kiriting.')
-        x=Series(
-            code=code,
-            title_uz=info['title'],
-            title_ru=info['title'],
-            description_uz=info['description'],
-            description_ru=info['description'],
-            description_uz_entities=serialize_entities(m.entities),
-            description_ru_entities=serialize_entities(m.entities),
-            metadata_text=m.text,
-            metadata_entities=serialize_entities(m.entities),
-            year=info['year'],
-            genre=info['genre'],
-            country=info['country'],
-            rating=info['rating']
-        )
-        s.add(x)
-        await s.flush()
-        s.add(Episode(
-            series_id=x.id,
-            season_number=1,
-            episode_number=1,
-            title_uz=info['title'],
-            title_ru=info['title'],
-            description_uz=info['description'],
-            description_ru=info['description'],
-            description_uz_entities=serialize_entities(m.entities),
-            description_ru_entities=serialize_entities(m.entities),
-            video_file_id=d['video_file_id'],
-            video_file_unique_id=d['video_file_unique_id']
-        ))
-        await s.commit()
-        await s.refresh(x)
-    await publish_ad(m.bot,x,'series')
-    await state.clear()
-    await m.answer(f'✅ Serial qo‘shildi!\\n📺 {x.title_uz}\\n🔢 Kod: {x.code}\\n🎞 1-qism: 1-fasl')
+        if (await s.execute(select(Movie).where(Movie.code==code))).scalar_one_or_none() or (await s.execute(select(Series).where(Series.code==code))).scalar_one_or_none():
+            return await m.answer('❌ Bu kod allaqachon ishlatilgan. Boshqa kod kiriting.')
+        x=Series(code=code,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'],description_ru=info['description'],description_uz_entities=serialize_entities(m.entities),description_ru_entities=serialize_entities(m.entities),metadata_text=m.text,metadata_entities=serialize_entities(m.entities),year=info['year'],genre=info['genre'],country=info['country'],rating=info['rating'])
+        s.add(x); await s.flush()
+        s.add(Episode(series_id=x.id,season_number=1,episode_number=1,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'],description_ru=info['description'],description_uz_entities=serialize_entities(m.entities),description_ru_entities=serialize_entities(m.entities),video_file_id=d['video_file_id'],video_file_unique_id=d['video_file_unique_id']))
+        await s.commit(); await s.refresh(x)
+    await publish_ad(m.bot,x,'series'); await state.clear()
+    await m.answer(f'✅ Serial qo‘shildi!\n📺 {x.title_uz}\n🔢 Kod: {x.code}\n🎞 1-qism: 1-fasl')
 
 @router.channel_post(F.video)
 async def private_import(post: Message):

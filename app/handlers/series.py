@@ -18,6 +18,7 @@ def vip(u):
 
 @router.message(F.text.in_({'📺 Seriallar', '📺 Сериалы'}))
 async def prompt(m: Message, state: FSMContext):
+    await state.clear()
     await state.set_state(UserContentState.waiting_series_code)
     await m.answer('📺 Serial kodini yuboring.')
 
