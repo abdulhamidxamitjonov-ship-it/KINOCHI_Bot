@@ -54,11 +54,11 @@ async def main():
     for r in [
         start.router,
         subscriptions.router,
+        admin.router,
         movies.router,
         series.router,
         vip.router,
         profile.router,
-        admin.router,
         payments.router,
     ]:
         dp.include_router(r)
