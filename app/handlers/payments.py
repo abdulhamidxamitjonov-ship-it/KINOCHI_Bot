@@ -1,53 +1,89 @@
+from datetime import datetime, timezone
+
 from aiogram import Router, F
-from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
-from app.database.models import VipPayment
-from app.database.database import Session
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy import select
+
 from app.config import settings
-from app.states.admin_content import MovieAddState, SeriesAddState
+from app.database.database import Session
+from app.database.models import User, VipPayment, VipPlan
+from app.states.admin_content import VipPurchaseState
 
 router = Router()
 
-@router.message(F.photo)
-async def receipt(m: Message, state: FSMContext):
-    # Payment receipts are for regular users. Admin poster images must be
-    # handled by the content router, so never claim an admin photo as a receipt.
-    if m.from_user.id in settings.admins:
-        return
 
-    # Poster images are intentionally NOT receipts. They are accepted only
-    # by the admin content handler when replying to the exact poster prompt.
-    # Regular users do not have the admin movie/series FSM states.
-    current = await state.get_state()
-    if current in {
-        MovieAddState.waiting_poster.state,
-        SeriesAddState.waiting_poster.state,
-        MovieAddState.waiting_video.state,
-        SeriesAddState.waiting_video.state,
-        MovieAddState.waiting_info.state,
-        SeriesAddState.waiting_info.state,
-    }:
-        return
+def admin_payment_kb(payment_id: str):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='✅ Tasdiqlash', callback_data=f'vip_payment:approve:{payment_id}'),
+        InlineKeyboardButton(text='❌ Rad etish', callback_data=f'vip_payment:reject:{payment_id}'),
+    ]])
+
+
+@router.message(VipPurchaseState.waiting_receipt, F.photo)
+async def receipt(m: Message, state: FSMContext):
+    data = await state.get_data()
+    payment_id = data.get('payment_id')
+    if not payment_id:
+        await state.clear()
+        return await m.answer('❌ Faol VIP to‘lovi topilmadi. VIP bo‘limidan qaytadan boshlang.')
 
     async with Session() as s:
-        from sqlalchemy import select
-        from app.database.models import User
-        u = (await s.execute(
-            select(User).where(User.telegram_id == m.from_user.id)
-        )).scalar_one_or_none()
-        if not u:
-            return
-
         payment = (await s.execute(
-            select(VipPayment)
-            .where(VipPayment.user_id == u.id, VipPayment.status == 'PENDING')
-            .order_by(VipPayment.created_at.desc())
-        )).scalars().first()
-
+            select(VipPayment).where(VipPayment.payment_id == payment_id).with_for_update()
+        )).scalar_one_or_none()
         if not payment:
-            return
+            await state.clear()
+            return await m.answer('❌ To‘lov topilmadi.')
+        now = datetime.now(timezone.utc)
+        if payment.status != 'PENDING':
+            await state.clear()
+            return await m.answer('⚠️ Bu to‘lov allaqachon yakunlangan. Yangi VIP to‘lovini boshlang.')
+        if payment.expires_at and payment.expires_at <= now:
+            payment.status = 'EXPIRED'
+            payment.rejection_reason = '5 daqiqalik to‘lov muddati tugagan.'
+            await s.commit()
+            await state.clear()
+            return await m.answer('⏰ 5 daqiqalik to‘lov vaqti tugagan. VIP xaridini qaytadan boshlang.')
+
+        user = await s.get(User, payment.user_id)
+        plan = await s.get(VipPlan, payment.plan_id)
+        if not user or not plan:
+            await state.clear()
+            return await m.answer('❌ To‘lov ma’lumotlari topilmadi.')
 
         payment.receipt_file_id = m.photo[-1].file_id
         await s.commit()
 
-    await m.answer('🧾 Chek qabul qilindi. Admin tekshiruvini kuting.')
+        admin_text = (
+            '👑 <b>YANGI VIP TO‘LOVI</b>\n\n'
+            f'👤 Ism: {user.first_name or "-"}\n'
+            f'🆔 Telegram ID: <code>{user.telegram_id}</code>\n'
+            f'🔗 Username: @{user.username if user.username else "-"}\n'
+        )
+        admin_text += (
+            f'\n\n📦 Tarif: <b>{plan.name_uz}</b>'
+            f'\n💰 Summa: <b>{payment.amount:,} {payment.currency}</b>'
+            f'\n🆔 To‘lov ID: <code>{payment.payment_id}</code>'
+            f'\n⏳ Muddati: 5 daqiqa'
+            f'\n📌 Holati: <b>PENDING</b>'
+        )
+        receipt_id = payment.receipt_file_id
+
+    # Send to every configured admin immediately after receipt is stored.
+    sent = 0
+    for aid in settings.admins:
+        try:
+            await m.bot.send_photo(aid, receipt_id, caption=admin_text, reply_markup=admin_payment_kb(payment_id))
+            sent += 1
+        except Exception:
+            # One unavailable admin must not block the user's payment record.
+            continue
+
+    await state.clear()
+    await m.answer(
+        '🧾 Chek qabul qilindi.\n'
+        f'👑 {plan.name_uz}\n'
+        f'💰 {payment.amount:,} UZS\n\n'
+        '⏳ Admin tasdiqlashini kuting.'
+    )

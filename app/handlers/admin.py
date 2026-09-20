@@ -1,4 +1,5 @@
 import re
+from uuid import uuid4
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -8,7 +9,7 @@ from app.config import settings
 from app.database.database import Session
 from app.database.models import User, Movie, Series, Episode, VipPayment, MandatoryChannel
 from app.keyboards.admin import menu, confirm
-from app.states.admin_content import MovieAddState, SeriesAddState
+from app.states.admin_content import MovieAddState, SeriesAddState, MandatoryAddState
 from app.utils.entities import serialize_entities, deserialize_entities
 from app.utils.deep_links import movie_link, series_link
 
@@ -19,7 +20,7 @@ def is_admin(m): return is_admin_id(m.from_user.id)
 def parse_info(text):
     values = {
         'title': '', 'year': None, 'genre': '',
-        'country': '', 'rating': '', 'description': ''
+        'country': '', 'rating': '', 'description': '', 'code': ''
     }
 
     aliases = {
@@ -32,7 +33,7 @@ def parse_info(text):
         'reyting': 'rating', 'reytingi': 'rating', 'rating': 'rating',
         'рейтинг': 'rating',
         'tavsif': 'description', 'description': 'description',
-        'описание': 'description'
+        'описание': 'description', 'kod': 'code', 'kodi': 'code', 'code': 'code', 'код': 'code'
     }
 
     for raw in (text or '').splitlines():
@@ -62,49 +63,34 @@ def parse_info(text):
 
 def info_prompt(kind):
     n='kino' if kind=='movie' else 'serial'
-    return f'''📝 {n.title()} ma'lumotlarini bitta xabarda yuboring.\n\n🎬 {n.title()} nomi: ...\n📅 Yil: ...\n🎭 Janr: ...\n🌍 Davlat: ...\n⭐ Reyting: ...\n📝 Tavsif: ...\n\nPremium Custom Emoji ishlatishingiz mumkin.'''
+    return f"""📝 {n.title()} ma'lumotlarini bitta xabarda yuboring.
+
+🎬 {n.title()} nomi: ...
+📅 Yil: ...
+🎭 Janr: ...
+🌍 Davlat: ...
+⭐ Reyting: ...
+📝 Tavsif: ...
+🔢 Kod: ...
+
+⚠️ Kodni eng oxirgi qatorda yozing. Bot aynan shu kod bilan saqlaydi.
+Premium Custom Emoji ishlatishingiz mumkin."""
 
 def ad_kb(kind,code):
     url=(movie_link(settings.bot_username.lstrip('@'),code) if kind=='movie' else series_link(settings.bot_username.lstrip('@'),code))
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='▶️ KINONI OLISH' if kind=='movie' else '▶️ SERIALNI KO‘RISH',url=url)]])
 
 def ad_caption(obj,kind):
-    title=obj.title_uz
-    desc=obj.description_uz or ''
-    lines=[f'🎬 {title}',f'📅 {obj.year or "—"}',f'🎭 {obj.genre or "—"}',f'🌍 {obj.country or "—"}',f'⭐ {obj.rating or "—"}',f'🔢 Kod: {obj.code}']
+    text=getattr(obj,'metadata_text',None)
+    if text: return text
+    title=obj.title_uz; desc=obj.description_uz or ''
+    lines=[f'🎬 {title}',f'📅 {obj.year or '-'}',f'🎭 {obj.genre or '-'}',f'🌍 {obj.country or '-'}',f'⭐ {obj.rating or '-'}',f'🔢 Kod: {obj.code}']
     if desc: lines += ['', '📝 '+desc]
     return '\n'.join(lines)
 
-def shifted_entities(entities,prefix):
-    if not entities:return []
-    # Telegram entity offsets are UTF-16; prefix is plain ASCII/emoji. Compute exact UTF-16 length.
-    shift=len(prefix.encode('utf-16-le'))//2
-    out=[]
-    for e in entities:
-        d=e.model_dump(); d['offset']=d.get('offset',0)+shift; out.append(d)
-    return deserialize_entities(out)
-
 async def publish_ad(bot,obj,kind):
-    if not settings.ad_channel_id or not settings.bot_username:
-        return
-    caption=ad_caption(obj,kind)
-    # Preserve Custom Emoji entities from the admin's description.
-    prefix='\\n'.join([
-        f'🎬 {obj.title_uz}',
-        f'📅 {obj.year or "—"}',
-        f'🎭 {obj.genre or "—"}',
-        f'🌍 {obj.country or "—"}',
-        f'⭐ {obj.rating or "—"}',
-        f'🔢 Kod: {obj.code}'
-    ])+'\\n\\n📝 '
-    entities=shifted_entities(deserialize_entities(obj.description_uz_entities),prefix)
-    # The ad is sent once as a normal text message. The bot never edits it later.
-    await bot.send_message(
-        settings.ad_channel_id,
-        caption,
-        entities=entities,
-        reply_markup=ad_kb(kind,obj.code)
-    )
+    if not settings.ad_channel_id or not settings.bot_username: return
+    await bot.send_message(settings.ad_channel_id,ad_caption(obj,kind),entities=deserialize_entities(getattr(obj,'metadata_entities',None) or []) or None,reply_markup=ad_kb(kind,obj.code))
 
 async def next_code(s):
     mx=(await s.execute(select(func.max(Movie.id)))).scalar() or 0
@@ -154,10 +140,14 @@ async def mi(m,state):
     info=parse_info(m.text)
     if not info['title']:
         return await m.answer('❌ Kino nomi topilmadi. Masalan: 🎬 Kino nomi: Qasos')
+    if not info['code']:
+        return await m.answer('❌ Kino kodi topilmadi. Kodni eng oxirgi qatorda yozing: 🔢 Kod: 1234')
     d=await state.get_data()
     await state.update_data(info=info,description_entities=serialize_entities(m.entities))
     async with Session() as s:
-        code=await next_code(s)
+        code=info['code'].strip()
+        if len(code)>64 or any(ch.isspace() for ch in code): return await m.answer('❌ Kod noto‘g‘ri. Kod 64 belgigacha va bo‘shliqsiz bo‘lsin.')
+        if (await s.execute(select(Movie).where(Movie.code==code))).scalar_one_or_none() or (await s.execute(select(Series).where(Series.code==code))).scalar_one_or_none(): return await m.answer('❌ Bu kod allaqachon ishlatilgan. Boshqa kod kiriting.')
         x=Movie(
             code=code,
             title_uz=info['title'],
@@ -166,6 +156,8 @@ async def mi(m,state):
             description_ru=info['description'],
             description_uz_entities=serialize_entities(m.entities),
             description_ru_entities=serialize_entities(m.entities),
+            metadata_text=m.text,
+            metadata_entities=serialize_entities(m.entities),
             year=info['year'],
             genre=info['genre'],
             country=info['country'],
@@ -188,10 +180,14 @@ async def si(m,state):
     info=parse_info(m.text)
     if not info['title']:
         return await m.answer('❌ Serial nomi topilmadi. Masalan: 🎬 Serial nomi: ...')
+    if not info['code']:
+        return await m.answer('❌ Serial kodi topilmadi. Kodni eng oxirgi qatorda yozing: 🔢 Kod: 1234')
     d=await state.get_data()
     await state.update_data(info=info,description_entities=serialize_entities(m.entities))
     async with Session() as s:
-        code=await next_code(s)
+        code=info['code'].strip()
+        if len(code)>64 or any(ch.isspace() for ch in code): return await m.answer('❌ Kod noto‘g‘ri. Kod 64 belgigacha va bo‘shliqsiz bo‘lsin.')
+        if (await s.execute(select(Movie).where(Movie.code==code))).scalar_one_or_none() or (await s.execute(select(Series).where(Series.code==code))).scalar_one_or_none(): return await m.answer('❌ Bu kod allaqachon ishlatilgan. Boshqa kod kiriting.')
         x=Series(
             code=code,
             title_uz=info['title'],
@@ -200,6 +196,8 @@ async def si(m,state):
             description_ru=info['description'],
             description_uz_entities=serialize_entities(m.entities),
             description_ru_entities=serialize_entities(m.entities),
+            metadata_text=m.text,
+            metadata_entities=serialize_entities(m.entities),
             year=info['year'],
             genre=info['genre'],
             country=info['country'],
@@ -283,6 +281,8 @@ async def private_import(post: Message):
             description_ru=info['description'] or '',
             description_uz_entities=serialize_entities(post.caption_entities),
             description_ru_entities=serialize_entities(post.caption_entities),
+            metadata_text=caption,
+            metadata_entities=serialize_entities(post.caption_entities),
             year=info['year'],
             genre=info['genre'],
             country=info['country'],
@@ -307,7 +307,7 @@ async def mandatory_menu(m):
     if not is_admin(m):return
     async with Session() as s: items=(await s.execute(select(MandatoryChannel).where(MandatoryChannel.active==True))).scalars().all()
     rows=[[InlineKeyboardButton(text=f'🗑 {x.title[:35]}',callback_data=f'mandatory_delete:{x.id}')] for x in items]
-    rows.insert(0,[InlineKeyboardButton(text='➕ Qo‘shish (ID + URL)',callback_data='mandatory_add_help')])
+    rows.insert(0,[InlineKeyboardButton(text='➕ Kanal/guruh qo‘shish',callback_data='mandatory_add_help')])
     await m.answer('📢 Majburiy obuna\n\nO‘chirish uchun kerakli obunani bosing.',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 @router.callback_query(F.data.startswith('mandatory_delete:'))
 async def mandatory_delete(c):
@@ -324,11 +324,6 @@ async def mandatory_confirm(c):
         await c.message.edit_text('✅ Majburiy obuna o‘chirildi.')
     else: await c.message.edit_text('❌ Bekor qilindi.')
     await c.answer()
-@router.callback_query(F.data=='mandatory_add_help')
-async def add_help(c):
-    if is_admin_id(c.from_user.id): await c.message.answer('➕ Qo‘shish funksiyasi uchun /channels bo‘limidan foydalaning. Format: chat ID va havola.')
-    await c.answer()
-
 @router.message(Command('channels'))
 async def channels_cmd(m): await mandatory_menu(m)
 @router.message(Command('users'))
@@ -345,3 +340,177 @@ async def pay_cmd(m):
 @router.message(Command('broadcast'))
 async def broadcast_cmd(m):
     if is_admin(m): await m.answer('📣 Broadcast bo‘limi.')
+
+
+# ---------- Mandatory subscription by URL ----------
+def _resolve_chat_from_url(url: str):
+    url = url.strip()
+    if url.startswith('@'):
+        return url
+    m = re.match(r'^https?://t\.me/([A-Za-z0-9_]{5,})/?$', url)
+    if m:
+        return '@' + m.group(1)
+    m = re.match(r'^https?://t\.me/c/(\d+)(?:/\d+)?/?$', url)
+    if m:
+        return int('-100' + m.group(1))
+    return None
+
+@router.callback_query(F.data == 'mandatory_add_help')
+async def mandatory_add_start(c, state):
+    if not is_admin_id(c.from_user.id):
+        return await c.answer('Ruxsat yo‘q', show_alert=True)
+    await state.set_state(MandatoryAddState.waiting_url)
+    await c.message.answer(
+        '➕ Kanal yoki guruh havolasini yuboring.\n\n'
+        'Masalan:\n'
+        'https://t.me/kanal_nomi\n'
+        'https://t.me/c/123456789/1\n\n'
+        '⚠️ Bot shu kanal/guruhda administrator bo‘lishi kerak.'
+    )
+    await c.answer()
+
+@router.message(MandatoryAddState.waiting_url)
+async def mandatory_add_url(m, state):
+    if not is_admin(m):
+        return
+    url = (m.text or '').strip()
+    target = _resolve_chat_from_url(url)
+    if target is None:
+        return await m.answer(
+            '❌ Bu havoladan kanal/guruhni aniqlab bo‘lmadi.\n\n'
+            'Public kanal/guruh uchun: https://t.me/username\n'
+            'Private kanal/guruh uchun esa Telegramdagi xabar havolasini yuboring: https://t.me/c/123456789/1'
+        )
+    try:
+        chat = await m.bot.get_chat(target)
+        me = await m.bot.get_chat_member(chat.id, m.bot.id)
+        if me.status not in ('administrator', 'creator'):
+            return await m.answer('❌ Bot bu kanal/guruhda administrator emas.')
+    except Exception:
+        return await m.answer(
+            '❌ Kanal/guruhni topib bo‘lmadi. Botni avval administrator qiling va havolani qayta yuboring.'
+        )
+    async with Session() as s:
+        exists = (await s.execute(
+            select(MandatoryChannel).where(MandatoryChannel.chat_id == chat.id, MandatoryChannel.active.is_(True))
+        )).scalar_one_or_none()
+        if exists:
+            await state.clear()
+            return await m.answer('⚠️ Bu kanal/guruh allaqachon majburiy obunada.')
+        code = f'{chat.id}_{uuid4().hex[:8]}'
+        s.add(MandatoryChannel(
+            chat_id=chat.id,
+            title=chat.title or str(chat.id),
+            url=url,
+            chat_type=chat.type,
+            tracking_code=code,
+        ))
+        await s.commit()
+    await state.clear()
+    await m.answer(f'✅ Majburiy obuna qo‘shildi:\n📢 {chat.title or chat.id}\n🔗 {url}')
+
+# ---------- Admin panel sections ----------
+@router.message(F.text == '📊 Statistika')
+async def stats_button(m):
+    if is_admin(m):
+        await stats(m)
+
+@router.message(F.text == '👥 Foydalanuvchilar')
+async def users_button(m):
+    if not is_admin(m): return
+    async with Session() as s:
+        total = await s.scalar(select(func.count()).select_from(User))
+        vip_users = await s.scalar(select(func.count()).select_from(User).where(User.vip_expires_at != None))
+    await m.answer(f'👥 Foydalanuvchilar\n\nJami: {total}\n👑 VIP bo‘lganlar: {vip_users}')
+
+@router.message(F.text == '🎁 Referallar')
+async def referrals_button(m):
+    if not is_admin(m): return
+    from app.database.models import Referral
+    async with Session() as s:
+        total = await s.scalar(select(func.count()).select_from(Referral))
+        qualified = await s.scalar(select(func.count()).select_from(Referral).where(Referral.status == 'QUALIFIED'))
+    await m.answer(f'🎁 Referallar\n\nJami: {total}\n✅ Tasdiqlangan: {qualified}')
+
+@router.message(F.text == '📣 Reklama')
+async def broadcast_button(m):
+    if not is_admin(m): return
+    await m.answer('📣 Reklama\n\nXabar yuborish uchun /broadcast buyrug‘idan foydalaning.')
+
+@router.message(F.text == '⚙️ Sozlamalar')
+async def settings_button(m):
+    if not is_admin(m): return
+    await m.answer(
+        '⚙️ Sozlamalar\n\n'
+        f'🤖 Bot: @{settings.bot_username.lstrip("@")}\n'
+        f'📢 Reklama kanali: {settings.ad_channel_url or "sozlanmagan"}\n'
+        f'🗄 Private kanal: {settings.private_movie_channel_url or "sozlanmagan"}'
+    )
+
+@router.message(F.text == '💳 To‘lovlar')
+async def payments_button(m):
+    if not is_admin(m): return
+    async with Session() as s:
+        pending = (await s.execute(
+            select(VipPayment).where(VipPayment.status == 'PENDING').order_by(VipPayment.created_at.desc())
+        )).scalars().all()
+    if not pending:
+        return await m.answer('💳 Hozircha kutilayotgan VIP to‘lovlari yo‘q.')
+    await m.answer('💳 Kutilayotgan to‘lovlar: ' + str(len(pending)) + '\nCheklar kelishi bilan ular adminlarga avtomatik yuboriladi.')
+
+# ---------- VIP payment approval: atomic, idempotent ----------
+@router.callback_query(F.data.startswith('vip_payment:'))
+async def vip_payment_action(c: CallbackQuery):
+    if not is_admin_id(c.from_user.id):
+        return await c.answer('Ruxsat yo‘q', show_alert=True)
+    _, action, payment_id = c.data.split(':', 2)
+    from datetime import datetime, timezone, timedelta
+    from app.database.models import VipTransaction, VipPlan
+    async with Session() as s:
+        payment = (await s.execute(
+            select(VipPayment).where(VipPayment.payment_id == payment_id).with_for_update()
+        )).scalar_one_or_none()
+        if not payment:
+            return await c.answer('❌ To‘lov topilmadi.', show_alert=True)
+        if payment.status != 'PENDING':
+            label = {'APPROVED':'✅ Tasdiqlangan','REJECTED':'❌ Rad etilgan','EXPIRED':'⏰ Muddati tugagan'}.get(payment.status, payment.status)
+            return await c.answer(f'⚠️ Bu to‘lov allaqachon yakunlangan: {label}', show_alert=True)
+        now = datetime.now(timezone.utc)
+        if payment.expires_at and payment.expires_at <= now:
+            payment.status = 'EXPIRED'
+            payment.rejection_reason = '5 daqiqalik to‘lov muddati tugagan.'
+            await s.commit()
+            return await c.answer('⏰ To‘lovning 5 daqiqalik muddati tugagan.', show_alert=True)
+        if not payment.receipt_file_id:
+            return await c.answer('⚠️ Chek hali yuborilmagan.', show_alert=True)
+        user = await s.get(User, payment.user_id)
+        plan = await s.get(VipPlan, payment.plan_id)
+        if not user or not plan:
+            return await c.answer('❌ To‘lov ma’lumotlari topilmadi.', show_alert=True)
+        payment.status = 'APPROVED' if action == 'approve' else 'REJECTED'
+        payment.verified_at = now
+        payment.verified_by = c.from_user.id
+        if action == 'approve':
+            current = user.vip_expires_at
+            base = current if current and current > now else now
+            user.vip_expires_at = base + timedelta(days=plan.days)
+            s.add(VipTransaction(user_id=user.id, type='PURCHASE', days=plan.days, payment_id=payment.payment_id, admin_id=c.from_user.id))
+        else:
+            payment.rejection_reason = 'Admin tomonidan rad etildi.'
+        await s.commit()
+        status_text = '✅ TASDIQLANGAN' if action == 'approve' else '❌ RAD ETILGAN'
+        expires = user.vip_expires_at.strftime('%d.%m.%Y %H:%M') if action == 'approve' and user.vip_expires_at else '-'
+    await c.message.edit_caption(
+        caption=(c.message.caption or '') + f'\n\n<b>HOLAT: {status_text}</b>\n👨‍💼 Admin ID: <code>{c.from_user.id}</code>' + (f'\n⏳ VIP: {expires}' if action == 'approve' else ''),
+        reply_markup=None
+    )
+    try:
+        await c.bot.send_message(
+            user.telegram_id,
+            f"{'✅ VIP to‘lovingiz tasdiqlandi!' if action == 'approve' else '❌ VIP to‘lovingiz rad etildi.'}\n\n"
+            f'👑 Tarif: {plan.name_uz}\n💰 Summa: {payment.amount:,} UZS' +
+            (f'\n⏳ VIP muddati: {expires}' if action == 'approve' else '')
+        )
+    except Exception:
+        pass
+    await c.answer('To‘lov tasdiqlandi.' if action == 'approve' else 'To‘lov rad etildi.')

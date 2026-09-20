@@ -25,22 +25,3 @@ async def open_sub(c):
  async with Session() as s:x=await s.get(MandatoryChannel,sid)
  if x: await c.message.answer('📢 Majburiy obuna',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📢 Majburiy obuna',url=x.url)]]))
  await c.answer()
-@router.callback_query(F.data=='mandatory_add_help')
-async def add_start(c,state):
- if c.from_user.id not in settings.admins:return await c.answer('Ruxsat yo‘q',show_alert=True)
- await state.set_state(MandatoryAddState.waiting_chat_id);await c.message.answer('➕ Kanal/guruh chat ID sini yuboring. Masalan: -1001234567890');await c.answer()
-@router.message(MandatoryAddState.waiting_chat_id)
-async def add_id(m,state):
- if m.from_user.id not in settings.admins:return
- try: cid=int(m.text.strip())
- except: return await m.answer('❌ Chat ID noto‘g‘ri.')
- await state.update_data(chat_id=cid);await state.set_state(MandatoryAddState.waiting_url);await m.answer('🔗 Endi kanal/guruh havolasini yuboring.');
-@router.message(MandatoryAddState.waiting_url)
-async def add_url(m,state):
- if m.from_user.id not in settings.admins:return
- url=m.text.strip();d=await state.get_data()
- try: chat=await m.bot.get_chat(d['chat_id'])
- except Exception as e:return await m.answer('❌ Bot bu chatni ko‘ra olmadi. Botni avval administrator qiling va IDni tekshiring.')
- async with Session() as s:
-  s.add(MandatoryChannel(chat_id=chat.id,title=chat.title or str(chat.id),url=url,chat_type=chat.type,tracking_code=f'{chat.id}_{abs(hash(url))%1000000}'));await s.commit()
- await state.clear();await m.answer(f'✅ Majburiy obuna qo‘shildi: {chat.title or chat.id}')
