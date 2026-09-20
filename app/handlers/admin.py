@@ -85,12 +85,26 @@ def shifted_entities(entities,prefix):
     return deserialize_entities(out)
 
 async def publish_ad(bot,obj,kind):
-    if not settings.ad_channel_id or not settings.bot_username or not obj.poster_file_id:return
+    if not settings.ad_channel_id or not settings.bot_username:
+        return
     caption=ad_caption(obj,kind)
-    # Preserve custom emoji in the description portion.
-    prefix='\n'.join([f'🎬 {obj.title_uz}',f'📅 {obj.year or "—"}',f'🎭 {obj.genre or "—"}',f'🌍 {obj.country or "—"}',f'⭐ {obj.rating or "—"}',f'🔢 Kod: {obj.code}'])+'\n\n📝 '
+    # Preserve Custom Emoji entities from the admin's description.
+    prefix='\\n'.join([
+        f'🎬 {obj.title_uz}',
+        f'📅 {obj.year or "—"}',
+        f'🎭 {obj.genre or "—"}',
+        f'🌍 {obj.country or "—"}',
+        f'⭐ {obj.rating or "—"}',
+        f'🔢 Kod: {obj.code}'
+    ])+'\\n\\n📝 '
     entities=shifted_entities(deserialize_entities(obj.description_uz_entities),prefix)
-    await bot.send_photo(settings.ad_channel_id,obj.poster_file_id,caption=caption,caption_entities=entities,reply_markup=ad_kb(kind,obj.code))
+    # The ad is sent once as a normal text message. The bot never edits it later.
+    await bot.send_message(
+        settings.ad_channel_id,
+        caption,
+        entities=entities,
+        reply_markup=ad_kb(kind,obj.code)
+    )
 
 async def next_code(s):
     mx=(await s.execute(select(func.max(Movie.id)))).scalar() or 0
@@ -138,29 +152,33 @@ async def mv(m,state):
 @router.message(MovieAddState.waiting_info,F.text)
 async def mi(m,state):
     info=parse_info(m.text)
-    if not info['title']: return await m.answer('❌ Kino nomi topilmadi. Masalan: 🎬 Kino nomi: Qasos')
-    await state.update_data(info=info,description_entities=serialize_entities(m.entities))
-    await state.set_state(MovieAddState.waiting_poster)
-    prompt = await m.answer(
-        '🖼 Endi reklama kanaliga chiqadigan poster rasmini yuboring.\n'
-        '⚠️ Poster rasmini aynan shu xabarga Reply qilib yuboring.'
-    )
-    await state.update_data(poster_prompt_message_id=prompt.message_id)
-@router.message(MovieAddState.waiting_poster,F.photo)
-async def mp(m,state):
+    if not info['title']:
+        return await m.answer('❌ Kino nomi topilmadi. Masalan: 🎬 Kino nomi: Qasos')
     d=await state.get_data()
-    prompt_id = d.get('poster_prompt_message_id')
-    if not m.reply_to_message or m.reply_to_message.message_id != prompt_id:
-        await m.answer(
-            '⚠️ Bu rasm poster sifatida qabul qilinmadi.\n'
-            '🖼 Poster rasmini aynan “Endi reklama kanaliga chiqadigan poster rasmini yuboring.” '
-            'xabariga Reply qilib yuboring.'
-        )
-        return
-    info=d['info']
+    await state.update_data(info=info,description_entities=serialize_entities(m.entities))
     async with Session() as s:
-        code=await next_code(s); x=Movie(code=code,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'],description_ru=info['description'],description_uz_entities=d.get('description_entities'),description_ru_entities=d.get('description_entities'),year=info['year'],genre=info['genre'],country=info['country'],rating=info['rating'],poster_file_id=m.photo[-1].file_id,video_file_id=d['video_file_id'],video_file_unique_id=d['video_file_unique_id']); s.add(x); await s.commit(); await s.refresh(x)
-    await publish_ad(m.bot,x,'movie'); await state.clear(); await m.answer(f'✅ Kino qo‘shildi!\n🎬 {x.title_uz}\n🔢 Kod: {x.code}')
+        code=await next_code(s)
+        x=Movie(
+            code=code,
+            title_uz=info['title'],
+            title_ru=info['title'],
+            description_uz=info['description'],
+            description_ru=info['description'],
+            description_uz_entities=serialize_entities(m.entities),
+            description_ru_entities=serialize_entities(m.entities),
+            year=info['year'],
+            genre=info['genre'],
+            country=info['country'],
+            rating=info['rating'],
+            video_file_id=d['video_file_id'],
+            video_file_unique_id=d['video_file_unique_id']
+        )
+        s.add(x)
+        await s.commit()
+        await s.refresh(x)
+    await publish_ad(m.bot,x,'movie')
+    await state.clear()
+    await m.answer(f'✅ Kino qo‘shildi!\\n🎬 {x.title_uz}\\n🔢 Kod: {x.code}')
 
 @router.message(SeriesAddState.waiting_video,F.video)
 async def sv(m,state):
@@ -168,28 +186,45 @@ async def sv(m,state):
 @router.message(SeriesAddState.waiting_info,F.text)
 async def si(m,state):
     info=parse_info(m.text)
-    if not info['title']: return await m.answer('❌ Serial nomi topilmadi. Masalan: 🎬 Serial nomi: ...')
-    await state.update_data(info=info,description_entities=serialize_entities(m.entities))
-    await state.set_state(SeriesAddState.waiting_poster)
-    prompt = await m.answer(
-        '🖼 Endi serial reklama kanaliga chiqadigan poster rasmini yuboring.\n'
-        '⚠️ Poster rasmini aynan shu xabarga Reply qilib yuboring.'
-    )
-    await state.update_data(poster_prompt_message_id=prompt.message_id)
-@router.message(SeriesAddState.waiting_poster,F.photo)
-async def sp(m,state):
+    if not info['title']:
+        return await m.answer('❌ Serial nomi topilmadi. Masalan: 🎬 Serial nomi: ...')
     d=await state.get_data()
-    prompt_id = d.get('poster_prompt_message_id')
-    if not m.reply_to_message or m.reply_to_message.message_id != prompt_id:
-        await m.answer(
-            '⚠️ Bu rasm poster sifatida qabul qilinmadi.\n'
-            '🖼 Poster rasmini aynan poster so‘ralgan xabarga Reply qilib yuboring.'
-        )
-        return
-    info=d['info']
+    await state.update_data(info=info,description_entities=serialize_entities(m.entities))
     async with Session() as s:
-        code=await next_code(s); x=Series(code=code,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'],description_ru=info['description'],description_uz_entities=d.get('description_entities'),description_ru_entities=d.get('description_entities'),year=info['year'],genre=info['genre'],country=info['country'],rating=info['rating'],poster_file_id=m.photo[-1].file_id); s.add(x); await s.flush(); s.add(Episode(series_id=x.id,season_number=1,episode_number=1,title_uz=info['title'],title_ru=info['title'],description_uz=info['description'],description_ru=info['description'],description_uz_entities=d.get('description_entities'),description_ru_entities=d.get('description_entities'),video_file_id=d['video_file_id'],video_file_unique_id=d['video_file_unique_id'])); await s.commit(); await s.refresh(x)
-    await publish_ad(m.bot,x,'series'); await state.clear(); await m.answer(f'✅ Serial qo‘shildi!\n📺 {x.title_uz}\n🔢 Kod: {x.code}\n🎞 1-qism: 1-fasl')
+        code=await next_code(s)
+        x=Series(
+            code=code,
+            title_uz=info['title'],
+            title_ru=info['title'],
+            description_uz=info['description'],
+            description_ru=info['description'],
+            description_uz_entities=serialize_entities(m.entities),
+            description_ru_entities=serialize_entities(m.entities),
+            year=info['year'],
+            genre=info['genre'],
+            country=info['country'],
+            rating=info['rating']
+        )
+        s.add(x)
+        await s.flush()
+        s.add(Episode(
+            series_id=x.id,
+            season_number=1,
+            episode_number=1,
+            title_uz=info['title'],
+            title_ru=info['title'],
+            description_uz=info['description'],
+            description_ru=info['description'],
+            description_uz_entities=serialize_entities(m.entities),
+            description_ru_entities=serialize_entities(m.entities),
+            video_file_id=d['video_file_id'],
+            video_file_unique_id=d['video_file_unique_id']
+        ))
+        await s.commit()
+        await s.refresh(x)
+    await publish_ad(m.bot,x,'series')
+    await state.clear()
+    await m.answer(f'✅ Serial qo‘shildi!\\n📺 {x.title_uz}\\n🔢 Kod: {x.code}\\n🎞 1-qism: 1-fasl')
 
 @router.channel_post(F.video)
 async def private_import(post: Message):
